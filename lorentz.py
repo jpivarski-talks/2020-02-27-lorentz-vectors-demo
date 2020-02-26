@@ -449,6 +449,8 @@ def lower_lorentz_xyz_add(context, builder, sig, args):
 lorentzbehavior["__numba_typer__", "LorentzXYZ", operator.add, "LorentzXYZ"] = typer_lorentz_xyz_add
 lorentzbehavior["__numba_lower__", "LorentzXYZ", operator.add, "LorentzXYZ"] = lower_lorentz_xyz_add
 
+# Test it...
+
 @nb.njit
 def test_add(input):
     for muons in input:
@@ -459,3 +461,32 @@ def test_add(input):
 example5 = ak.Array(example, behavior=lorentzbehavior)
 
 print(test_add(example5))
+
+# All together now!
+
+@nb.njit
+def do_cool_stuff(input, output):
+    for muons in input:
+        output.beginlist()
+
+        for i in range(len(muons)):
+            output.beginlist()
+
+            for j in range(i + 1, len(muons)):
+                zboson = muons[i] + muons[j]
+
+                output.begintuple(2)
+                output.index(0)
+                output.append(zboson)
+                output.index(1)
+                output.append(zboson.mass)
+                output.endtuple()
+
+            output.endlist()
+
+        output.endlist()
+
+output = ak.FillableArray(behavior=lorentzbehavior)
+do_cool_stuff(example5, output)
+
+print(output.snapshot())
