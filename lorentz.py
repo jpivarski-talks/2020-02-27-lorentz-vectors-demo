@@ -1,5 +1,6 @@
 import sys
 import operator
+import json
 
 if "/home/jpivarski/irishep/awkward-1.0" not in sys.path:
     sys.path.insert(0, "/home/jpivarski/irishep/awkward-1.0")
@@ -116,6 +117,10 @@ def lorentz_xyz_pt_lower(context, builder, sig, args):
 lorentzbehavior["__numba_typer__", "LorentzXYZ", "pt"] = lorentz_xyz_pt_typer
 lorentzbehavior["__numba_lower__", "LorentzXYZ", "pt"] = lorentz_xyz_pt_lower
 
+# If we wanted a method (with arguments determined in the typer), the signature would be:
+# 
+#     lorentzbehavior["__numba_lower__", "LorentzXYZ", "pt", ()] = ...
+
 example3 = ak.Array(example, behavior=lorentzbehavior)
 
 @nb.njit
@@ -176,6 +181,200 @@ print(output.snapshot())
 # into the arrays, and Awkward Arrays can't be created in Numba (that restriction gives
 # us a lot of freedom and this model favors the development of a functional language).
 # 
-# So we need to create a new Numba type that is a free-floating LorentzXYZ.
+# So we need to create a new Numba type that is a free-floating LorentzXYZCommon.
+# Fortunately, that's s more conventional task and serves as a good introduction to Numba.
+
+class LorentzXYZFree(LorentzXYZCommon):
+    def __init__(self, x, y, z, t):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.t = t
+
+    def __repr__(self):
+        return "Lxyz({0:.3g} {1:.3g} {2:.3g} {3:.3g})".format(self.x, self.y, self.z, self.t)
+
+    def __getitem__(self, attr):
+        # It has to behave the same way as the bound objects or users will get confused.
+        if attr in ("x", "y", "z", "t"):
+            return getattr(self, attr)
+        else:
+            raise ValueError("key {0} does not exist (not in record)".format(json.dumps(attr)))
+
+@nb.extending.typeof_impl.register(LorentzXYZFree)
+def typeof_LorentzXYZFree(obj, c):
+    return LorentzXYZType()
+
+class LorentzXYZType(nb.types.Type):
+    def __init__(self):
+        # Type names have to be unique identifiers; they determine whether Numba
+        # will recompile a function with new types.
+        super(LorentzXYZType, self).__init__(name="LorentzXYZType()")
+
+@nb.extending.register_model(LorentzXYZType)
+class LorentzXYZModel(nb.datamodel.models.StructModel):
+    def __init__(self, dmm, fe_type):
+        # This is the C-style struct that will be used wherever LorentzXYZ are needed.
+        members = [("x", nb.float64),
+                   ("y", nb.float64),
+                   ("z", nb.float64),
+                   ("t", nb.float64)]
+        super(LorentzXYZModel, self).__init__(dmm, fe_type, members)
+
+@nb.extending.unbox(LorentzXYZType)
+def unbox_LorentzXYZ(lxyztype, lxyzobj, c):
+    # How to turn LorentzXYZFree Python objects into LorentzXYZModel structs.
+    x_obj = c.pyapi.object_getattr_string(lxyzobj, "x")
+    y_obj = c.pyapi.object_getattr_string(lxyzobj, "y")
+    z_obj = c.pyapi.object_getattr_string(lxyzobj, "z")
+    t_obj = c.pyapi.object_getattr_string(lxyzobj, "t")
+
+    # "values" are raw LLVM code; "proxies" have getattr/setattr logic to access fields.
+    outproxy = c.context.make_helper(c.builder, lxyztype)
+
+    # https://github.com/numba/numba/blob/master/numba/core/pythonapi.py
+    outproxy.x = c.pyapi.float_as_double(x_obj)
+    outproxy.y = c.pyapi.float_as_double(y_obj)
+    outproxy.z = c.pyapi.float_as_double(z_obj)
+    outproxy.t = c.pyapi.float_as_double(t_obj)
+
+    # Yes, we're in that world...
+    c.pyapi.decref(x_obj)
+    c.pyapi.decref(y_obj)
+    c.pyapi.decref(z_obj)
+    c.pyapi.decref(t_obj)
+
+    is_error = nb.cgutils.is_not_null(c.builder, c.pyapi.err_occurred())
+    return nb.extending.NativeValue(outproxy._getvalue(), is_error)
+
+@nb.extending.box(LorentzXYZType)
+def box_LorentzXYZ(lxyztype, lxyzval, c):
+    # This proxy is initialized with a value, used for getattr, rather than setattr.
+    inproxy = c.context.make_helper(c.builder, lxyztype, lxyzval)
+    x_obj = c.pyapi.float_from_double(inproxy.x)
+    y_obj = c.pyapi.float_from_double(inproxy.y)
+    z_obj = c.pyapi.float_from_double(inproxy.z)
+    t_obj = c.pyapi.float_from_double(inproxy.t)
+
+    # The way we get Python objects into this lowered world is by pickling them.
+    LorentzXYZFree_obj = c.pyapi.unserialize(c.pyapi.serialize_object(LorentzXYZFree))
+
+    out = c.pyapi.call_function_objargs(LorentzXYZFree_obj, (x_obj, y_obj, z_obj, t_obj))
+
+    c.pyapi.decref(LorentzXYZFree_obj)
+    c.pyapi.decref(x_obj)
+    c.pyapi.decref(y_obj)
+    c.pyapi.decref(z_obj)
+    c.pyapi.decref(t_obj)
+
+    return out
+
+# Now we've defined enough that our objects can go into and come out of Numba.
+
+testit = LorentzXYZFree(1, 2, 3, 4)
+print(testit)
+
+@nb.njit
+def pass_through(obj):
+    return obj
+
+print(testit, pass_through(testit))
+
+# Notice that the original has int fields and the passed-through has floats:
+print(testit.x, pass_through(testit).x)
+
+# Now it's time to define the methods and properties.
+
+# To simply map model attributes to user-accessible properties, use a macro.
+nb.extending.make_attribute_wrapper(LorentzXYZType, "x", "x")
+nb.extending.make_attribute_wrapper(LorentzXYZType, "y", "y")
+nb.extending.make_attribute_wrapper(LorentzXYZType, "z", "z")
+nb.extending.make_attribute_wrapper(LorentzXYZType, "t", "t")
+
+# For more general cases, there's an AttributeTemplate.
+@nb.typing.templates.infer_getattr
+class methods_LorentzXYZ_typer(nb.typing.templates.AttributeTemplate):
+    key = LorentzXYZType
+
+    def generic_resolve(self, lxyztype, attr):
+        if attr == "pt":
+            return nb.float64
+        elif attr == "eta":
+            return nb.float64
+        elif attr == "phi":
+            return nb.float64
+        elif attr == "mass":
+            return nb.float64
+        else:
+            # typers that return None defer to other typers.
+            return None
+
+    # If we had any methods with arguments, this is how we'd do it.
+    # 
+    # @nb.typing.templates.bound_function("pt")
+    # def pt_resolve(self, lxyztype, args, kwargs):
+    #     ...
+
+# To lower these functions, we can duck-type the Python functions above.
+# Since they're defined in terms of NumPy functions, they apply to
+#
+#    * Python scalars
+#    * NumPy arrays
+#    * Awkward arrays
+#    * lowered Numba values
+
+@nb.extending.lower_getattr(LorentzXYZType, "pt")
+def lower_LorentzXYZ_pt(context, builder, lxyztype, lxyzval):
+    return context.compile_internal(builder, lorentz_xyz_pt, nb.float64(lxyztype), (lxyzval,))
+
+@nb.extending.lower_getattr(LorentzXYZType, "eta")
+def lower_LorentzXYZ_eta(context, builder, lxyztype, lxyzval):
+    return context.compile_internal(builder, lorentz_xyz_eta, nb.float64(lxyztype), (lxyzval,))
+
+@nb.extending.lower_getattr(LorentzXYZType, "phi")
+def lower_LorentzXYZ_phi(context, builder, lxyztype, lxyzval):
+    return context.compile_internal(builder, lorentz_xyz_phi, nb.float64(lxyztype), (lxyzval,))
+
+@nb.extending.lower_getattr(LorentzXYZType, "mass")
+def lower_LorentzXYZ_mass(context, builder, lxyztype, lxyzval):
+    return context.compile_internal(builder, lorentz_xyz_mass, nb.float64(lxyztype), (lxyzval,))
+
+# And the __getitem__ access...
+@nb.typing.templates.infer_global(operator.getitem)
+class getitem_LorentzXYZ_typer(nb.typing.templates.AbstractTemplate):
+    def generic(self, args, kwargs):
+        if len(args) == 2 and len(kwargs) == 0 and isinstance(args[0], LorentzXYZType):
+            # Only accept compile-time constants. It's a fair restriction.
+            if isinstance(args[1], nb.types.StringLiteral):
+                if args[1].literal_value in ("x", "y", "z", "t"):
+                    return nb.float64(*args)
+
+@nb.extending.lower_builtin(operator.getitem, LorentzXYZType, nb.types.StringLiteral)
+def getitem_LorentzXYZ_lower(context, builder, sig, args):
+    rettype, (lxyztype, wheretype) = sig.return_type, sig.args
+    lxyzval, whereval = args
+
+    inproxy = context.make_helper(builder, lxyztype, lxyzval)
+
+    # The value of a StringLiteral is in its compile-time type.
+    if wheretype.literal_value == "x":
+        return inproxy.x
+    elif wheretype.literal_value == "y":
+        return inproxy.y
+    elif wheretype.literal_value == "z":
+        return inproxy.z
+    elif wheretype.literal_value == "t":
+        return inproxy.t
+
+# Now we can use all of these. LorentzXYZFree is as fully functional as LorentzXYZ.
+
+@nb.njit
+def try_it_out(testit):
+    return testit.x, testit["x"], testit.pt, testit.eta, testit.phi, testit.mass
+
+print(try_it_out(testit))
+
+# Finally, we want to be able to append LorentzXYZFree to a FillableArray, as though
+# it were an attached LorentzXYZ.
 
 
