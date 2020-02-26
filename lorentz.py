@@ -15,8 +15,10 @@ tree = uproot.open("../uproot/tests/samples/HZZ.root")["events"]
 x, y, z, t = tree.arrays(["Muon_Px", "Muon_Py", "Muon_Pz", "Muon_E"], outputtype=tuple)
 offsets = ak.layout.Index64(x.offsets)
 content = ak.layout.RecordArray({
-    "x": ak.layout.NumpyArray(x.content), "y": ak.layout.NumpyArray(y.content), 
-    "z": ak.layout.NumpyArray(z.content), "t": ak.layout.NumpyArray(t.content)},
+    "x": ak.layout.NumpyArray(x.content.astype(np.float64)),
+    "y": ak.layout.NumpyArray(y.content.astype(np.float64)), 
+    "z": ak.layout.NumpyArray(z.content.astype(np.float64)),
+    "t": ak.layout.NumpyArray(t.content.astype(np.float64))},
     parameters={"__record__": "LorentzXYZ", "__typestr__": "Lxyz"})
 
 # I like "LorentzXYZ" as a name for Cartesian Lorentz vectors. It can recognizably
@@ -283,6 +285,35 @@ print(testit, pass_through(testit))
 # Notice that the original has int fields and the passed-through has floats:
 print(testit.x, pass_through(testit).x)
 
+# Defining an in-Numba constructor is a separate thing.
+@nb.extending.type_callable(LorentzXYZFree)
+def typer_LorentzXYZFree_constructor(context):
+    def typer(x, y, z, t):
+        if x == nb.types.float64 and y == nb.types.float64 and z == nb.types.float64 and t == nb.types.float64:
+            return LorentzXYZType()
+    return typer
+
+@nb.extending.lower_builtin(LorentzXYZFree, nb.types.float64, nb.types.float64, nb.types.float64, nb.types.float64)
+def lower_LorentzXYZFree_constructor(context, builder, sig, args):
+    rettype, (xtype, ytype, ztype, ttype) = sig.return_type, sig.args
+    xval, yval, zval, tval = args
+
+    outproxy = context.make_helper(builder, rettype)
+    outproxy.x = xval
+    outproxy.y = yval
+    outproxy.z = zval
+    outproxy.t = tval
+
+    return outproxy._getvalue()
+
+# Test it!
+
+@nb.njit
+def test_constructor():
+    return LorentzXYZFree(1.1, 2.2, 3.3, 4.4)
+
+print(test_constructor())
+        
 # Now it's time to define the methods and properties.
 
 # To simply map model attributes to user-accessible properties, use a macro.
@@ -350,7 +381,7 @@ class typer_LorentzXYZ_getitem(nb.typing.templates.AbstractTemplate):
                     return nb.float64(*args)
 
 @nb.extending.lower_builtin(operator.getitem, LorentzXYZType, nb.types.StringLiteral)
-def getitem_LorentzXYZ_lower(context, builder, sig, args):
+def lower_getitem_LorentzXYZ(context, builder, sig, args):
     rettype, (lxyztype, wheretype) = sig.return_type, sig.args
     lxyzval, whereval = args
 
@@ -404,3 +435,27 @@ output = ak.FillableArray(behavior=lorentzbehavior)
 fill_it(testit, output)
 
 print(output.snapshot())
+
+# Now that we have free Lorentz vectors, we can finally define addition.
+
+def typer_lorentz_xyz_add(binop, left, right):
+    return LorentzXYZType()(left, right)
+
+def lower_lorentz_xyz_add(context, builder, sig, args):
+    def compute(left, right):
+        return LorentzXYZFree(left.x + right.x, left.y + right.y, left.z + right.z, left.t + right.t)
+    return context.compile_internal(builder, compute, sig, args)
+
+lorentzbehavior["__numba_typer__", "LorentzXYZ", operator.add, "LorentzXYZ"] = typer_lorentz_xyz_add
+lorentzbehavior["__numba_lower__", "LorentzXYZ", operator.add, "LorentzXYZ"] = lower_lorentz_xyz_add
+
+@nb.njit
+def test_add(input):
+    for muons in input:
+        for i in range(len(muons)):
+            for j in range(i + 1, len(muons)):
+                return muons[i] + muons[j]
+
+example5 = ak.Array(example, behavior=lorentzbehavior)
+
+print(test_add(example5))
