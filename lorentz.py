@@ -108,14 +108,14 @@ print(example2[hastwo, 0] + example2[hastwo, 1])
 print((example2[hastwo, 0] + example2[hastwo, 1]).mass)
 
 # Now for Numba:
-def lorentz_xyz_pt_typer(viewtype):
+def typer_lorentz_xyz_pt(viewtype):
     return nb.float64
 
-def lorentz_xyz_pt_lower(context, builder, sig, args):
+def lower_lorentz_xyz_pt(context, builder, sig, args):
     return context.compile_internal(builder, lorentz_xyz_pt, sig, args)
 
-lorentzbehavior["__numba_typer__", "LorentzXYZ", "pt"] = lorentz_xyz_pt_typer
-lorentzbehavior["__numba_lower__", "LorentzXYZ", "pt"] = lorentz_xyz_pt_lower
+lorentzbehavior["__numba_typer__", "LorentzXYZ", "pt"] = typer_lorentz_xyz_pt
+lorentzbehavior["__numba_lower__", "LorentzXYZ", "pt"] = lower_lorentz_xyz_pt
 
 # If we wanted a method (with arguments determined in the typer), the signature would be:
 # 
@@ -144,16 +144,16 @@ do_it_in_numba(example3, output)
 print(output.snapshot())
 
 # We can define binary operations (operator.add being the one we want most)...
-def lorentz_xyz_eq_typer(binop, left, right):
+def typer_lorentz_xyz_eq(binop, left, right):
     return nb.boolean(left, right)
 
-def lorentz_xyz_eq_lower(context, builder, sig, args):
+def lower_lorentz_xyz_eq(context, builder, sig, args):
     def compute(left, right):
         return abs(left.x - right.x) + abs(left.y - right.y) + abs(left.z - right.z) + abs(left.t - right.t) < 0.001
     return context.compile_internal(builder, compute, sig, args)
 
-lorentzbehavior["__numba_typer__", "LorentzXYZ", operator.eq, "LorentzXYZ"] = lorentz_xyz_eq_typer
-lorentzbehavior["__numba_lower__", "LorentzXYZ", operator.eq, "LorentzXYZ"] = lorentz_xyz_eq_lower
+lorentzbehavior["__numba_typer__", "LorentzXYZ", operator.eq, "LorentzXYZ"] = typer_lorentz_xyz_eq
+lorentzbehavior["__numba_lower__", "LorentzXYZ", operator.eq, "LorentzXYZ"] = lower_lorentz_xyz_eq
 
 example4 = ak.Array(example, behavior=lorentzbehavior)
 
@@ -293,7 +293,7 @@ nb.extending.make_attribute_wrapper(LorentzXYZType, "t", "t")
 
 # For more general cases, there's an AttributeTemplate.
 @nb.typing.templates.infer_getattr
-class methods_LorentzXYZ_typer(nb.typing.templates.AttributeTemplate):
+class typer_LorentzXYZ_methods(nb.typing.templates.AttributeTemplate):
     key = LorentzXYZType
 
     def generic_resolve(self, lxyztype, attr):
@@ -341,7 +341,7 @@ def lower_LorentzXYZ_mass(context, builder, lxyztype, lxyzval):
 
 # And the __getitem__ access...
 @nb.typing.templates.infer_global(operator.getitem)
-class getitem_LorentzXYZ_typer(nb.typing.templates.AbstractTemplate):
+class typer_LorentzXYZ_getitem(nb.typing.templates.AbstractTemplate):
     def generic(self, args, kwargs):
         if len(args) == 2 and len(kwargs) == 0 and isinstance(args[0], LorentzXYZType):
             # Only accept compile-time constants. It's a fair restriction.
@@ -375,6 +375,32 @@ def try_it_out(testit):
 print(try_it_out(testit))
 
 # Finally, we want to be able to append LorentzXYZFree to a FillableArray, as though
-# it were an attached LorentzXYZ.
+# it were an attached LorentzXYZ. This doesn't need a typer; the types are obvious.
 
+def lower_FillableArray_append_LorentzXYZ(context, builder, sig, args):
+    def doit(output, lxyz):
+        output.beginrecord("LorentzXYZ")
+        output.field("x")
+        output.real(lxyz.x)
+        output.field("y")
+        output.real(lxyz.y)
+        output.field("z")
+        output.real(lxyz.z)
+        output.field("t")
+        output.real(lxyz.t)
+        output.endrecord()
+    return context.compile_internal(builder, doit, sig, args)
 
+lorentzbehavior["__numba_lower__", ak.FillableArray.append, LorentzXYZType] = lower_FillableArray_append_LorentzXYZ
+
+# Attaching free objects to a FillableArray doesn't look any different to the user.
+
+@nb.njit
+def fill_it(testit, output):
+    output.append(testit)
+    output.append(testit)
+    
+output = ak.FillableArray(behavior=lorentzbehavior)
+fill_it(testit, output)
+
+print(output.snapshot())
