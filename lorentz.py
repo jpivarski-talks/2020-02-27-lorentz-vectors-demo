@@ -1,4 +1,5 @@
 import sys
+import operator
 
 if "/home/jpivarski/irishep/awkward-1.0" not in sys.path:
     sys.path.insert(0, "/home/jpivarski/irishep/awkward-1.0")
@@ -16,6 +17,13 @@ content = ak.layout.RecordArray({
     "x": ak.layout.NumpyArray(x.content), "y": ak.layout.NumpyArray(y.content), 
     "z": ak.layout.NumpyArray(z.content), "t": ak.layout.NumpyArray(t.content)},
     parameters={"__record__": "LorentzXYZ", "__typestr__": "Lxyz"})
+
+# I like "LorentzXYZ" as a name for Cartesian Lorentz vectors. It can recognizably
+# be shortened to "Lxyz" and it invites the cylindrical form to be "LorentzCyl/Lcyl".
+#
+# They should be interchangeable: having the same methods/properties and freely
+# returning whichever form is most convenient. Source vectors would likely be Lcyl
+# and adding them would likely return Lxyz, for instance.
 
 # This array is generic: it doesn't know what records labeled "LorentzXYZ" mean.
 example = ak.Array(ak.layout.ListOffsetArray64(offsets, content))
@@ -129,3 +137,45 @@ output = ak.FillableArray(behavior=lorentzbehavior)
 do_it_in_numba(example3, output)
 
 print(output.snapshot())
+
+# We can define binary operations (operator.add being the one we want most)...
+def lorentz_xyz_eq_typer(binop, left, right):
+    return nb.boolean(left, right)
+
+def lorentz_xyz_eq_lower(context, builder, sig, args):
+    def compute(left, right):
+        return abs(left.x - right.x) + abs(left.y - right.y) + abs(left.z - right.z) + abs(left.t - right.t) < 0.001
+    return context.compile_internal(builder, compute, sig, args)
+
+lorentzbehavior["__numba_typer__", "LorentzXYZ", operator.eq, "LorentzXYZ"] = lorentz_xyz_eq_typer
+lorentzbehavior["__numba_lower__", "LorentzXYZ", operator.eq, "LorentzXYZ"] = lorentz_xyz_eq_lower
+
+example4 = ak.Array(example, behavior=lorentzbehavior)
+
+@nb.njit
+def check_equality(input, output):
+    for muons in input:
+        output.beginlist()
+
+        for i in range(len(muons)):
+            output.beginlist()
+            for j in range(i, len(muons)):
+                output.append(muons[i] == muons[j])
+            output.endlist()
+
+        output.endlist()
+
+output = ak.FillableArray(behavior=lorentzbehavior)
+check_equality(example4, output)
+
+print(output.snapshot())
+
+# The trouble with operator.add is that it returns new objects.
+# 
+# The records we have been dealing with are not free-floating objects; they're views
+# into the arrays, and Awkward Arrays can't be created in Numba (that restriction gives
+# us a lot of freedom and this model favors the development of a functional language).
+# 
+# So we need to create a new Numba type that is a free-floating LorentzXYZ.
+
+
